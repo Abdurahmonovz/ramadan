@@ -18,9 +18,9 @@ def load_config() -> Config:
     country = (os.getenv("COUNTRY") or "UZ").strip()
 
     if not token:
-        raise RuntimeError("BOT_TOKEN .env ichida yo‘q!")
+        raise RuntimeError("BOT_TOKEN yo‘q")
     if not admin.isdigit():
-        raise RuntimeError("ADMIN_ID raqam bo‘lishi kerak!")
+        raise RuntimeError("ADMIN_ID raqam bo‘lishi kerak")
 
     return Config(
         bot_token=token,

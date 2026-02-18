@@ -4,10 +4,6 @@ from datetime import date
 BASE = "https://api.aladhan.com/v1"
 
 async def get_today(city: str, country: str, method: int = 2, school: int = 1):
-    """
-    Returns today's Imsak and Maghrib by city/country.
-    method=2, school=1 (Hanafi) — xohlasang keyin o‘zgartiramiz.
-    """
     d = date.today().strftime("%d-%m-%Y")
     url = f"{BASE}/timingsByCity/{d}"
     params = {"city": city, "country": country, "method": method, "school": school}
@@ -21,6 +17,6 @@ async def get_today(city: str, country: str, method: int = 2, school: int = 1):
 
     t = data["data"]["timings"]
     return {
-        "imsak": t.get("Imsak"),      # og‘iz yopish
-        "maghrib": t.get("Maghrib"),  # og‘iz ochish
+        "imsak": t.get("Imsak"),
+        "maghrib": t.get("Maghrib"),
     }

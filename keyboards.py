@@ -33,7 +33,6 @@ def reminder_inline(minutes: int):
     )
 
 def city_inline():
-    # Shahar nomlari API qabul qiladigan EN formatlarda
     cities = [
         ("Tashkent", "Toshkent"),
         ("Samarkand", "Samarqand"),

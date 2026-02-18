@@ -3,38 +3,33 @@ from datetime import datetime, timedelta, date as dt_date
 import pytz
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import load_config
 from db import DB
 from prayers import get_today
 from keyboards import main_menu, stop_menu, reminder_inline, city_inline
-from texts import WELCOME, DUA_OCHISH, DUA_YOPISH
+from texts import WELCOME, DUA_OCHISH, DUA_YOPISH, GROUP_HELP
 
 cfg = load_config()
 db = DB()
 router = Router()
 
-# user_id -> asyncio.Task (jonli countdown)
+# chat_id -> asyncio.Task (jonli countdown)  ✅ group/DM uchun mos
 LIVE_TASKS: dict[int, asyncio.Task] = {}
-# user_id -> temp reminder minutes (inline sozlash payti)
+# user_id -> temp reminder minutes
 TEMP_REM: dict[int, int] = {}
 
 def now_tz() -> datetime:
     return datetime.now(pytz.timezone(cfg.tz))
 
 def parse_hhmm(s: str) -> datetime:
-    # "05:12 (+05)" -> "05:12"
     hhmm = (s or "").strip()[:5]
     return datetime.strptime(hhmm, "%H:%M")
 
 def build_targets(times: dict) -> tuple[datetime, datetime]:
-    """
-    returns (imsak_dt, maghrib_dt) tz-aware
-    """
     tz = pytz.timezone(cfg.tz)
     d = now_tz().date()
     imsak_dt = tz.localize(datetime.combine(d, parse_hhmm(times["imsak"]).time()))
@@ -50,8 +45,8 @@ def fmt_countdown(delta: timedelta) -> str:
     s = sec % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-async def stop_live(user_id: int) -> None:
-    task = LIVE_TASKS.pop(user_id, None)
+async def stop_live(chat_id: int) -> None:
+    task = LIVE_TASKS.pop(chat_id, None)
     if task and not task.done():
         task.cancel()
         try:
@@ -59,13 +54,15 @@ async def stop_live(user_id: int) -> None:
         except Exception:
             pass
 
-async def live_message_loop(bot: Bot, chat_id: int, mode: str, msg_id: int):
+async def live_message_loop(bot: Bot, chat_id: int, user_id: int, mode: str, msg_id: int):
     """
     mode: 'imsak' or 'maghrib'
     1 ta xabarni sekundiga edit qilib countdown qiladi.
+    chat_id: group/DM
+    user_id: kim ishga tushirgan bo‘lsa shahar/sozlama shundan olinadi
     """
     while True:
-        user = await db.get(chat_id)
+        user = await db.get(user_id)
         if not user:
             return
 
@@ -77,6 +74,7 @@ async def live_message_loop(bot: Bot, chat_id: int, mode: str, msg_id: int):
             continue
 
         now = now_tz()
+
         if mode == "imsak":
             target = imsak_dt
             title = "🌙 Og‘iz yopishga oz qoldi"
@@ -106,17 +104,57 @@ async def live_message_loop(bot: Bot, chat_id: int, mode: str, msg_id: int):
 
         await asyncio.sleep(1)
 
-async def start_live(bot: Bot, user_id: int, mode: str):
-    if user_id in LIVE_TASKS:
+async def start_live(bot: Bot, chat_id: int, user_id: int, mode: str):
+    # bir chatda bitta countdown
+    if chat_id in LIVE_TASKS:
         return
-    msg = await bot.send_message(user_id, "⏳ Eslatma boshlandi…", reply_markup=stop_menu())
-    task = asyncio.create_task(live_message_loop(bot, user_id, mode, msg.message_id))
-    LIVE_TASKS[user_id] = task
+    msg = await bot.send_message(chat_id, "⏳ Eslatma boshlandi…", reply_markup=stop_menu())
+    task = asyncio.create_task(live_message_loop(bot, chat_id, user_id, mode, msg.message_id))
+    LIVE_TASKS[chat_id] = task
+
+def choose_mode(imsak_dt: datetime, magh_dt: datetime, now: datetime) -> str:
+    if now < imsak_dt:
+        return "imsak"
+    if now < magh_dt:
+        return "maghrib"
+    # bugun o‘tib ketgan bo‘lsa, ertaga imsakga sanaydi (soddaroq)
+    return "imsak"
+
+# ===== Commands =====
 
 @router.message(CommandStart())
 async def start(m: Message):
     await db.ensure(m.from_user.id)
     await m.answer(WELCOME, reply_markup=main_menu())
+    if m.chat.type != "private":
+        await m.answer(GROUP_HELP)
+
+@router.message(Command("ramadan"))
+async def ramadan_cmd(m: Message):
+    # group/kanalda ishlaydi: shu chatga vaqt + countdown chiqaradi
+    await db.ensure(m.from_user.id)
+    user = await db.get(m.from_user.id)
+
+    t = await get_today(user["city"], cfg.country)
+    imsak_dt, magh_dt = build_targets(t)
+    now = now_tz()
+    mode = choose_mode(imsak_dt, magh_dt, now)
+
+    await stop_live(m.chat.id)
+    await m.answer(
+        f"📍 {user['city']}\n"
+        f"🌙 Og‘iz yopish (Imsak): {t['imsak']}\n"
+        f"🍽 Og‘iz ochish (Maghrib): {t['maghrib']}\n\n"
+        f"⏳ Countdown boshlanmoqda…",
+        reply_markup=stop_menu()
+    )
+
+    # oxirgi yuborgan xabarga countdown bog‘laymiz
+    # (eng yaxshisi: yangi xabar yuborib, o‘shani edit qilamiz)
+    msg = await m.answer("⏳ ...", reply_markup=stop_menu())
+    await start_live(m.bot, m.chat.id, m.from_user.id, mode)
+
+# ===== Menu actions =====
 
 @router.message(F.text == "🍽 Og‘iz ochish duosi")
 async def dua_ochish(m: Message):
@@ -149,14 +187,13 @@ async def city_cb(c: CallbackQuery):
 
 @router.message(F.text.regexp(r"^[A-Za-zА-Яа-я‘’'` \-]{3,40}$"))
 async def custom_city_text(m: Message):
-    # Shahar yozib yuborsa, API bilan tekshirib ko‘ramiz.
     await db.ensure(m.from_user.id)
     city = m.text.strip()
 
     try:
         _ = await get_today(city, cfg.country)
     except Exception:
-        return  # oddiy gap bo‘lsa aralashmaymiz
+        return
 
     await db.set_city(m.from_user.id, city)
     await m.answer(f"✅ Shahar saqlandi: {city}", reply_markup=main_menu())
@@ -166,10 +203,12 @@ async def today_times(m: Message):
     await db.ensure(m.from_user.id)
     user = await db.get(m.from_user.id)
     t = await get_today(user["city"], cfg.country)
+
     await m.answer(
         f"📍 {user['city']}\n\n"
         f"🌙 Og‘iz yopish (Imsak): {t['imsak']}\n"
-        f"🍽 Og‘iz ochish (Maghrib): {t['maghrib']}\n",
+        f"🍽 Og‘iz ochish (Maghrib): {t['maghrib']}\n\n"
+        f"Bot sahar/iftordan oldin avtomatik countdownni yoqadi.",
         reply_markup=main_menu()
     )
 
@@ -202,12 +241,15 @@ async def rem_cb(c: CallbackQuery):
 
 @router.message(F.text == "🛑 To‘xtatish")
 async def stop_btn(m: Message):
-    await db.ensure(m.from_user.id)
-    await stop_live(m.from_user.id)
+    await stop_live(m.chat.id)
     await m.answer("🛑 To‘xtatildi.", reply_markup=main_menu())
 
-# AVTOMATIK: user bosmasa ham before-minut oldin countdown boshlaydi
+# ===== Auto reminders (DM only) =====
 async def reminder_tick(bot: Bot):
+    """
+    Avtomatik reminder: faqat user DM (private chat) uchun ishlaydi.
+    Group/kanal uchun /ramadan bilan start qiling.
+    """
     users = await db.list_enabled()
     now = now_tz()
     today_str = dt_date.today().isoformat()
@@ -215,8 +257,11 @@ async def reminder_tick(bot: Bot):
     for u in users:
         uid = u["user_id"]
 
-        # Countdown ketayotgan bo‘lsa qayta boshlamaymiz
-        if uid in LIVE_TASKS:
+        # DM chat_id = uid bo‘ladi (private)
+        chat_id = uid
+
+        # DM’da allaqachon countdown ketayotgan bo‘lsa
+        if chat_id in LIVE_TASKS:
             continue
 
         try:
@@ -227,23 +272,21 @@ async def reminder_tick(bot: Bot):
 
         before = int(u["remind_before"])
 
-        # Imsakdan oldin
         imsak_remind = imsak_dt - timedelta(minutes=before)
         if imsak_remind <= now < imsak_remind + timedelta(seconds=30):
             if (u.get("last_imsak_date") or "") != today_str:
                 try:
-                    await start_live(bot, uid, "imsak")
+                    await start_live(bot, chat_id, uid, "imsak")
                     await db.mark_sent(uid, "imsak", today_str)
                 except Exception:
                     pass
             continue
 
-        # Maghribdan oldin
         mag_remind = magh_dt - timedelta(minutes=before)
         if mag_remind <= now < mag_remind + timedelta(seconds=30):
             if (u.get("last_maghrib_date") or "") != today_str:
                 try:
-                    await start_live(bot, uid, "maghrib")
+                    await start_live(bot, chat_id, uid, "maghrib")
                     await db.mark_sent(uid, "maghrib", today_str)
                 except Exception:
                     pass
@@ -255,7 +298,6 @@ async def main():
     dp.include_router(router)
 
     scheduler = AsyncIOScheduler(timezone=cfg.tz)
-    # 30 sekundda bir tekshiradi (window ushlash uchun)
     scheduler.add_job(reminder_tick, "interval", seconds=30, args=[bot])
     scheduler.start()
 

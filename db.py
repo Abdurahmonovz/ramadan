@@ -47,10 +47,6 @@ class DB:
             await db.commit()
 
     async def mark_sent(self, user_id: int, kind: str, date_str: str) -> None:
-        """
-        kind: 'imsak' or 'maghrib'
-        date_str: YYYY-MM-DD
-        """
         col = "last_imsak_date" if kind == "imsak" else "last_maghrib_date"
         async with aiosqlite.connect(self.path) as db:
             await db.execute(f"UPDATE users SET {col}=? WHERE user_id=?", (date_str, user_id))
