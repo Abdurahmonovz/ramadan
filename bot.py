@@ -113,13 +113,18 @@ async def live_message_loop(bot: Bot, chat_id: int, user_id: int, mode: str, msg
             f"🛑 To‘xtatish bossangiz eslatma to‘xtaydi."
         )
 
+        # ✅ MUHIM: edit xatoda task o‘lib qolmasin
         try:
             await bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id)
         except Exception:
-            return
+            await asyncio.sleep(2)
+            continue
 
         if diff.total_seconds() <= 0:
-            await bot.send_message(chat_id, "✅ Vaqt bo‘ldi!")
+            try:
+                await bot.send_message(chat_id, "✅ Vaqt bo‘ldi!")
+            except Exception:
+                pass
             return
 
         await asyncio.sleep(1)
@@ -279,7 +284,7 @@ async def cal_cb(c: CallbackQuery):
 
     now = now_tz()
     years_to_try = [now.year, now.year + 1]
-    rows = []  # (greg_date, imsak, maghrib)
+    rows = []  # (greg_date, imsak, magh)
 
     for year in years_to_try:
         for month in range(1, 13):
@@ -326,6 +331,9 @@ async def reminder_tick(bot: Bot):
     now = now_tz()
     today_str = dt_date.today().isoformat()
 
+    # ✅ MUHIM: scheduler kechiksa ham ushlashi uchun
+    window = timedelta(minutes=2)
+
     for u in users:
         uid = u["user_id"]
         chat_id = uid  # DM chat_id = user_id
@@ -342,7 +350,10 @@ async def reminder_tick(bot: Bot):
         before = int(u["remind_before"])
 
         imsak_remind = imsak_dt - timedelta(minutes=before)
-        if imsak_remind <= now < imsak_remind + timedelta(seconds=30):
+        mag_remind = magh_dt - timedelta(minutes=before)
+
+        # ✅ Imsak: remind vaqti kelgan/kechiksa ham (window ichida) start bo‘ladi
+        if imsak_remind - window <= now <= imsak_dt:
             if (u.get("last_imsak_date") or "") != today_str:
                 try:
                     await start_live(bot, chat_id, uid, "imsak")
@@ -351,8 +362,8 @@ async def reminder_tick(bot: Bot):
                     pass
             continue
 
-        mag_remind = magh_dt - timedelta(minutes=before)
-        if mag_remind <= now < mag_remind + timedelta(seconds=30):
+        # ✅ Maghrib: remind vaqti kelgan/kechiksa ham (window ichida) start bo‘ladi
+        if mag_remind - window <= now <= magh_dt:
             if (u.get("last_maghrib_date") or "") != today_str:
                 try:
                     await start_live(bot, chat_id, uid, "maghrib")
@@ -368,7 +379,9 @@ async def main():
     dp.include_router(router)
 
     scheduler = AsyncIOScheduler(timezone=cfg.tz)
-    scheduler.add_job(reminder_tick, "interval", seconds=30, args=[bot])
+
+    # ✅ tezroq tekshiradi, o‘tib ketib qolmaydi
+    scheduler.add_job(reminder_tick, "interval", seconds=10, args=[bot])
     scheduler.start()
 
     await dp.start_polling(bot)
